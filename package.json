@@ -1,0 +1,57 @@
+{
+  "name": "pi-diagnostics",
+  "version": "0.1.0",
+  "description": "Enable free Anthropic and OpenAI prompt-cache diagnostics in pi",
+  "keywords": [
+    "pi",
+    "pi-package",
+    "prompt-cache",
+    "diagnostics",
+    "anthropic",
+    "openai"
+  ],
+  "license": "MIT",
+  "author": "Tianren Dong",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tianrendong/pi-diagnostics.git"
+  },
+  "homepage": "https://github.com/tianrendong/pi-diagnostics#readme",
+  "bugs": {
+    "url": "https://github.com/tianrendong/pi-diagnostics/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "type": "module",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.3",
+    "jiti": "^2.7.0"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm run check && npm test"
+  }
+}
