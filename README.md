@@ -1,6 +1,11 @@
 # pi-diagnostics
 
-Pi extension that opts into provider prompt-cache diagnostics and stores returned results in the session transcript.
+Pi extension for prompt-cache visibility:
+
+1. **Provider diagnostics** — opts into Anthropic/OpenAI prompt-cache diagnostics and stores results in the session transcript.
+2. **Expiry reminders** — adds a display-only transcript entry when the prompt cache likely expired, so you know it is a cheaper moment to `/compact`, switch model, or change tool/skill loadout.
+
+## Provider diagnostics
 
 - **Anthropic Messages:** adds `diagnostics.previous_message_id` on every request. First request sends `null`; later requests reference preceding `responseId`.
 - **OpenAI Responses:** adds `prompt_cache_options.comparison_response_id` when a previous response exists.
@@ -11,6 +16,22 @@ Pi extension that opts into provider prompt-cache diagnostics and stores returne
 - `/diagnostics` shows recent results and saves its output in session history.
 
 Provider diagnostics are free and best-effort. No prompt or output content is persisted by this extension. Provider fingerprints are handled under provider retention policies.
+
+## Expiry reminders
+
+- Uses `pi.appendEntry()`, not `sendMessage()`: `cache-expiry-reminder` entries are visible in the session but never sent to the model provider.
+- Accounts for `cacheWarming` (`off`, `streaming`, `idle`), Pi's 30-minute idle-warming limit, warming usage entries, replayability limits, model-declared `promptCache` TTLs, `PI_CACHE_RETENTION=long`, explicit provider payload retention, compaction, and system/tool-loadout changes.
+- Falls back to provider-family TTL estimates when model metadata omits `promptCache`: Anthropic/Gemini 5m; OpenAI ~30m over Responses, ~40m over Codex (observed from local session data). Routed Claude/Gemini keep family defaults. Explicit model/payload TTLs win.
+- Follows cache protocol, not model family: Anthropic Messages forks reuse matching prefixes; OpenAI Responses uses Pi's session-derived `prompt_cache_key`, so `/fork` starts a new cache namespace and the reminder waits for the fork's first request.
+- Requests on other branches below the last request keep the shared prefix warm and postpone the reminder.
+- One reminder per cache touch. Collapsed, the reminder is one line; press `ctrl+o` (`app.tools.expand`) for model, cache timing, context size, and warming status.
+- Always says "may have expired": provider TTLs and eviction are best-effort.
+
+Trace scheduling decisions:
+
+```bash
+export PI_EXPIRY_REMINDER_DEBUG=/tmp/expiry-reminder.log
+```
 
 ## Install
 
@@ -64,7 +85,7 @@ npm test
 Test the local extension without installing the package:
 
 ```bash
-pi --extension ./src/index.ts
+pi --extension ./src/index.ts --extension ./src/expiry.ts
 ```
 
 ## License

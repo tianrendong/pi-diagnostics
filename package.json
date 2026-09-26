@@ -1,14 +1,15 @@
 {
   "name": "pi-diagnostics",
-  "version": "0.1.0",
-  "description": "Enable free Anthropic and OpenAI prompt-cache diagnostics in pi",
+  "version": "0.2.0",
+  "description": "Prompt-cache diagnostics and expiry reminders for pi",
   "keywords": [
     "pi",
     "pi-package",
     "prompt-cache",
     "diagnostics",
     "anthropic",
-    "openai"
+    "openai",
+    "cache-expiry"
   ],
   "license": "MIT",
   "author": "Tianren Dong",
@@ -35,7 +36,8 @@
   ],
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./src/index.ts",
+      "./src/expiry.ts"
     ]
   },
   "peerDependencies": {
@@ -53,7 +55,7 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test test/*.test.mjs test/*.test.ts",
     "prepublishOnly": "npm run check && npm test"
   }
 }
