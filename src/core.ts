@@ -27,12 +27,7 @@ export const API_KIND: Record<string, DiagnosticsKind> = {
   "openai-codex-responses": "openai",
 };
 
-/**
- * Provider entries are `provider` (every supported API) or `provider:kind` (one dialect).
- * Ramp Router is limited to its OpenAI Responses adapter: its Anthropic Messages route returns
- * `diagnostics: null` for every response, even for requests whose tools and system prompt changed.
- */
-export const DEFAULT_PROVIDERS = ["anthropic", "openai", "ramp-router:openai"];
+export const DEFAULT_PROVIDERS = ["anthropic", "openai", "ramp-router"];
 
 export interface ModelRef {
   provider: string;
@@ -42,10 +37,7 @@ export interface ModelRef {
 
 export interface Config {
   enabled: boolean;
-  /**
-   * Provider entries allowed to receive diagnostics fields: `provider`, `provider:anthropic`,
-   * `provider:openai`, or "*" for every provider on a supported API.
-   */
+  /** Provider names allowed to receive diagnostics fields. "*" allows every provider on a supported API. */
   providers: string[];
   /** When to show a UI notification. */
   notify: "miss" | "all" | "off";
@@ -68,9 +60,7 @@ export function kindFor(model: ModelRef | undefined, config: Config): Diagnostic
   if (!config.enabled || !model) return undefined;
   const kind = API_KIND[model.api];
   if (!kind) return undefined;
-  const allowed = config.providers.includes("*")
-    || config.providers.includes(model.provider)
-    || config.providers.includes(`${model.provider}:${kind}`);
+  const allowed = config.providers.includes("*") || config.providers.includes(model.provider);
   return allowed ? kind : undefined;
 }
 

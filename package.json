@@ -1,6 +1,6 @@
 {
   "name": "pi-diagnostics",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Prompt-cache diagnostics and expiry reminders for pi",
   "keywords": [
     "pi",
