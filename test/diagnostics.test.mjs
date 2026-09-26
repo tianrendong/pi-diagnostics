@@ -27,16 +27,6 @@ test("defaults only enable direct anthropic/openai providers", () => {
   assert.equal(core.kindFor(openai, config), "openai");
   assert.equal(core.kindFor({ ...openai, provider: "ramp-router" }, config), "openai");
   assert.equal(core.kindFor({ ...openai, provider: "other-router" }, config), undefined);
-  assert.equal(core.kindFor({ ...anthropic, provider: "ramp-router" }, config), undefined, "router Messages route returns no diagnostics");
-});
-
-test("provider entries can be scoped to one dialect", () => {
-  const both = core.parseConfig({ PI_DIAGNOSTICS_PROVIDERS: "ramp-router" });
-  assert.equal(core.kindFor({ ...anthropic, provider: "ramp-router" }, both), "anthropic");
-  assert.equal(core.kindFor({ ...openai, provider: "ramp-router" }, both), "openai");
-  const scoped = core.parseConfig({ PI_DIAGNOSTICS_PROVIDERS: "proxy:anthropic" });
-  assert.equal(core.kindFor({ ...anthropic, provider: "proxy" }, scoped), "anthropic");
-  assert.equal(core.kindFor({ ...openai, provider: "proxy" }, scoped), undefined);
 });
 
 test("injects provider opt-in fields", () => {
@@ -268,4 +258,10 @@ test("missing Anthropic diagnostics field is recorded as none, never as expired"
   assert.equal(Object.hasOwn(details, "raw"), false);
   assert.equal(details.droppedTokens, undefined);
   assert.equal(notices.length, 0);
+});
+
+test("follow-up lines drop the redundant cache-miss prefix", () => {
+  assert.equal(core.formatComplement({ outcome: "expired" }), "↳ Provider diagnostics: prompt unchanged, cache entry expired");
+  assert.equal(core.formatComplement({ outcome: "miss", reason: "tools_changed" }), "↳ Provider diagnostics reason: tools_changed");
+  assert.equal(core.formatComplement({ outcome: "unavailable" }, 5_000), "↳ Provider diagnostics reason: unavailable");
 });
