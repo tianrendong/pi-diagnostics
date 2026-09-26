@@ -27,6 +27,16 @@ test("defaults only enable direct anthropic/openai providers", () => {
   assert.equal(core.kindFor(openai, config), "openai");
   assert.equal(core.kindFor({ ...openai, provider: "ramp-router" }, config), "openai");
   assert.equal(core.kindFor({ ...openai, provider: "other-router" }, config), undefined);
+  assert.equal(core.kindFor({ ...anthropic, provider: "ramp-router" }, config), undefined, "router Messages route returns no diagnostics");
+});
+
+test("provider entries can be scoped to one dialect", () => {
+  const both = core.parseConfig({ PI_DIAGNOSTICS_PROVIDERS: "ramp-router" });
+  assert.equal(core.kindFor({ ...anthropic, provider: "ramp-router" }, both), "anthropic");
+  assert.equal(core.kindFor({ ...openai, provider: "ramp-router" }, both), "openai");
+  const scoped = core.parseConfig({ PI_DIAGNOSTICS_PROVIDERS: "proxy:anthropic" });
+  assert.equal(core.kindFor({ ...anthropic, provider: "proxy" }, scoped), "anthropic");
+  assert.equal(core.kindFor({ ...openai, provider: "proxy" }, scoped), undefined);
 });
 
 test("injects provider opt-in fields", () => {
@@ -57,6 +67,9 @@ test("cacheDrop only reports real drops above noise floor", () => {
 
 test("summarizes provider results", () => {
   assert.deepEqual(core.summarize("anthropic", null), { outcome: "hit" });
+  assert.deepEqual(core.summarize("anthropic", null, { cacheDropped: true }), { outcome: "expired" });
+  assert.deepEqual(core.summarize("anthropic", undefined), { outcome: "none" }, "absent field is not a hit");
+  assert.deepEqual(core.summarize("anthropic", undefined, { cacheDropped: true }), { outcome: "none" });
   assert.deepEqual(core.summarize("anthropic", { cache_miss_reason: null }), { outcome: "pending" });
   assert.deepEqual(core.summarize("openai", { type: "cache_miss", reason: "tools_changed", cache_missed_tokens: 5 }), {
     outcome: "miss",
@@ -101,7 +114,7 @@ test("extension end-to-end attaches diagnostics to assistant message", async (t)
     model: anthropic,
     mode: "tui",
     hasUI: true,
-    sessionManager: { getBranch: () => branch },
+    sessionManager: { getBranch: () => branch, getEntries: () => branch },
     ui: { notify: () => assert.fail("TUI notices must render from session entries") },
   };
 
@@ -153,7 +166,7 @@ async function runOpenAiTurn(t, { raw, cacheRead, baselineModel = "gpt", baselin
     model: openai,
     mode: "tui",
     hasUI: true,
-    sessionManager: { getBranch: () => branch },
+    sessionManager: { getBranch: () => branch, getEntries: () => branch },
     ui: { notify: () => assert.fail("TUI notices must render from session entries") },
   };
   await handlers.get("session_start")({}, ctx);
@@ -191,4 +204,68 @@ test("unavailable drop after model switch or compaction stays quiet", async (t) 
   assert.equal(switched.notices.length, 0);
   const compacted = await runOpenAiTurn(t, { raw: { type: "unavailable" }, cacheRead: 0, branchExtra: [{ type: "compaction" }] });
   assert.equal(compacted.notices.length, 0);
+});
+
+test("Anthropic SSE distinguishes absent diagnostics from explicit null", () => {
+  const start = (message) => JSON.stringify({ type: "message_start", message: { id: "msg_2", ...message } });
+  assert.equal(core.inspectSseData("anthropic", start({ diagnostics: null })).raw, null);
+  const absent = core.inspectSseData("anthropic", start({}));
+  assert.equal(absent.responseId, "msg_2");
+  assert.equal(absent.raw, undefined);
+});
+
+async function runAnthropicTurn(t, { message, cacheRead }) {
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  const event = { type: "message_start", message: { id: "msg_2", ...message } };
+  globalThis.fetch = async () =>
+    new Response(`event: message_start\ndata: ${JSON.stringify(event)}\n\n`, { headers: { "content-type": "text/event-stream" } });
+  const { handlers, notices } = loadExtension();
+  const branch = [{
+    type: "message",
+    message: {
+      role: "assistant", ...anthropic, model: "claude", responseId: "msg_1", stopReason: "stop",
+      usage: { input: 2, cacheRead: 100_000, cacheWrite: 500 },
+    },
+  }];
+  const ctx = {
+    model: anthropic, mode: "tui", hasUI: true,
+    sessionManager: { getBranch: () => branch, getEntries: () => branch },
+    ui: { notify: () => assert.fail("TUI notices must render from session entries") },
+  };
+  await handlers.get("session_start")({}, ctx);
+  const payload = handlers.get("before_provider_request")({ payload: { model: "claude", messages: [] } }, ctx);
+  await (await globalThis.fetch("https://api.anthropic.com/v1/messages", { method: "POST", body: JSON.stringify(payload) })).text();
+  const result = handlers.get("message_end")(
+    { message: { role: "assistant", ...anthropic, model: "claude", responseId: "msg_2", usage: { cacheRead, input: 4 } } },
+    ctx,
+  );
+  handlers.get("turn_end")({ message: result.message }, ctx);
+  await handlers.get("session_shutdown")({}, ctx);
+  return { notices, details: result.message.diagnostics[0].details };
+}
+
+test("Anthropic null with dropped cache reads reports an expired entry, not a hit", async (t) => {
+  const { notices, details } = await runAnthropicTurn(t, { message: { diagnostics: null }, cacheRead: 0 });
+  assert.equal(details.outcome, "expired");
+  assert.equal(details.droppedTokens, 100_502);
+  assert.equal(details.raw, null);
+  assert.deepEqual(notices.map((n) => n.data.message), ["Cache miss, provider diagnostics: prompt unchanged, cache entry expired"]);
+});
+
+test("Anthropic null with warm cache reads stays a quiet hit", async (t) => {
+  const { notices, details } = await runAnthropicTurn(t, { message: { diagnostics: null }, cacheRead: 100_500 });
+  assert.equal(details.outcome, "hit");
+  assert.equal(details.droppedTokens, undefined);
+  assert.equal(notices.length, 0);
+});
+
+test("missing Anthropic diagnostics field is recorded as none, never as expired", async (t) => {
+  const { notices, details } = await runAnthropicTurn(t, { message: {}, cacheRead: 0 });
+  assert.equal(details.outcome, "none");
+  assert.equal(Object.hasOwn(details, "raw"), false);
+  assert.equal(details.droppedTokens, undefined);
+  assert.equal(notices.length, 0);
 });

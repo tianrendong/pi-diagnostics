@@ -27,7 +27,12 @@ export const API_KIND: Record<string, DiagnosticsKind> = {
   "openai-codex-responses": "openai",
 };
 
-export const DEFAULT_PROVIDERS = ["anthropic", "openai", "ramp-router"];
+/**
+ * Provider entries are `provider` (every supported API) or `provider:kind` (one dialect).
+ * Ramp Router is limited to its OpenAI Responses adapter: its Anthropic Messages route returns
+ * `diagnostics: null` for every response, even for requests whose tools and system prompt changed.
+ */
+export const DEFAULT_PROVIDERS = ["anthropic", "openai", "ramp-router:openai"];
 
 export interface ModelRef {
   provider: string;
@@ -37,7 +42,10 @@ export interface ModelRef {
 
 export interface Config {
   enabled: boolean;
-  /** Provider names allowed to receive diagnostics fields. "*" allows every provider on a supported API. */
+  /**
+   * Provider entries allowed to receive diagnostics fields: `provider`, `provider:anthropic`,
+   * `provider:openai`, or "*" for every provider on a supported API.
+   */
   providers: string[];
   /** When to show a UI notification. */
   notify: "miss" | "all" | "off";
@@ -60,7 +68,9 @@ export function kindFor(model: ModelRef | undefined, config: Config): Diagnostic
   if (!config.enabled || !model) return undefined;
   const kind = API_KIND[model.api];
   if (!kind) return undefined;
-  const allowed = config.providers.includes("*") || config.providers.includes(model.provider);
+  const allowed = config.providers.includes("*")
+    || config.providers.includes(model.provider)
+    || config.providers.includes(`${model.provider}:${kind}`);
   return allowed ? kind : undefined;
 }
 
@@ -189,7 +199,10 @@ export function sniffBody(body: unknown): Probe | undefined {
 export interface RawResult {
   kind: DiagnosticsKind;
   responseId: string;
-  /** Raw provider diagnostics value (null when the provider reported none). */
+  /**
+   * Raw provider diagnostics value. `undefined` means the response had no diagnostics field at
+   * all (e.g. a proxy dropped it), which is different from Anthropic's explicit `null`.
+   */
   raw: unknown;
 }
 
@@ -207,7 +220,7 @@ export function inspectSseData(kind: DiagnosticsKind, data: string): RawResult |
     if (!isRecord(event) || event.type !== "message_start" || !isRecord(event.message)) return "stop";
     const id = event.message.id;
     if (typeof id !== "string") return "stop";
-    return { kind, responseId: id, raw: event.message.diagnostics ?? null };
+    return { kind, responseId: id, raw: Object.hasOwn(event.message, "diagnostics") ? event.message.diagnostics : undefined };
   }
 
   // OpenAI: terminal event carries the full response. Cheap substring check before parsing.
@@ -286,7 +299,8 @@ export function createSseTap(
 // Normalization
 // ---------------------------------------------------------------------------
 
-export type Outcome = "hit" | "miss" | "pending" | "not_found" | "unavailable" | "none";
+/** `expired`: the provider found no prompt change, but cached tokens dropped (TTL/eviction). */
+export type Outcome = "hit" | "miss" | "expired" | "pending" | "not_found" | "unavailable" | "none";
 
 export interface Summary {
   outcome: Outcome;
@@ -294,10 +308,18 @@ export interface Summary {
   missedTokens?: number;
 }
 
-export function summarize(kind: DiagnosticsKind, raw: unknown): Summary {
+export interface SummarizeContext {
+  /** Cached tokens dropped versus the baseline turn (see `cacheDrop`). */
+  cacheDropped?: boolean;
+}
+
+export function summarize(kind: DiagnosticsKind, raw: unknown, context: SummarizeContext = {}): Summary {
   if (kind === "anthropic") {
-    // null => no divergence (we always send a real previous id when summarizing).
-    if (raw === null || raw === undefined) return { outcome: "hit" };
+    // Field absent: nothing was reported (proxy dropped it or the route does not support it).
+    if (raw === undefined) return { outcome: "none" };
+    // null => the comparison found no divergence (we always send a real previous id when
+    // summarizing). With low cache reads that means the entry expired, not a hit.
+    if (raw === null) return { outcome: context.cacheDropped ? "expired" : "hit" };
     if (!isRecord(raw)) return { outcome: "unavailable" };
     const reason = raw.cache_miss_reason;
     if (reason === null || reason === undefined) return { outcome: "pending" };
@@ -356,6 +378,9 @@ export function formatNotification(summary: Summary, droppedTokens?: number): st
   if (summary.outcome === "miss") {
     return `Cache miss, provider diagnostics reason: ${summary.reason ?? "unknown"}`;
   }
+  if (summary.outcome === "expired") {
+    return "Cache miss, provider diagnostics: prompt unchanged, cache entry expired";
+  }
   if (summary.outcome === "unavailable" && droppedTokens !== undefined) {
     return "Cache miss, provider diagnostics reason: unavailable";
   }
@@ -371,4 +396,13 @@ export function formatNotification(summary: Summary, droppedTokens?: number): st
     case "none":
       return "Provider diagnostics result: no diagnostics returned";
   }
+}
+
+/**
+ * Follow-up line for Pi's native cache-miss notice, which already says "Cache miss" and how many
+ * tokens were re-billed. Only the provider's explanation is added.
+ */
+export function formatComplement(summary: Summary, droppedTokens?: number): string {
+  const text = formatNotification(summary, droppedTokens).replace(/^Cache miss, provider/, "Provider");
+  return `↳ ${text}`;
 }
