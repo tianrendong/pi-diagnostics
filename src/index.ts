@@ -1,8 +1,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import type { JsonValue } from "@earendil-works/pi-ai";
+import { Text, type Component } from "@earendil-works/pi-tui";
 import {
   cacheDrop,
   createSseTap,
+  formatComplement,
   formatNotification,
   DIAGNOSTIC_TYPE,
   findBaseline,
@@ -16,6 +18,7 @@ import {
   type ModelRef,
   type RawResult,
 } from "./core.ts";
+import { createNativeNoticeSetting, detectNativeMiss, isNativeNoticeShown, type AssistantLike } from "./native.ts";
 
 /** A request we modified whose response diagnostics should be captured. */
 interface Pending {
@@ -30,7 +33,43 @@ interface Pending {
 type Captured = RawResult & Pending;
 
 interface Notice {
+  /** Standalone text. */
   message: string;
+  /**
+   * Follow-up text used while Pi's native cache-miss notice is visible for the same response.
+   * Present only when Pi's own criteria for that notice are met.
+   */
+  complement?: string;
+}
+
+type Theme = Parameters<Parameters<ExtensionAPI["registerEntryRenderer"]>[1]>[2];
+
+/**
+ * Chooses standalone vs. follow-up text at render time: Pi re-derives its native notice from the
+ * current `showCacheMissNotices` value on every transcript rebuild, so this must too.
+ */
+class NoticeView implements Component {
+  private text?: string;
+  private view?: Text;
+
+  constructor(
+    private readonly notice: Notice,
+    private readonly theme: Theme,
+    private readonly nativeVisible: () => boolean,
+  ) {}
+
+  render(width: number): string[] {
+    const text = this.notice.complement && this.nativeVisible() ? this.notice.complement : this.notice.message;
+    if (!this.view || text !== this.text) {
+      this.text = text;
+      this.view = new Text(this.theme.fg("dim", text), 1, 0);
+    }
+    return this.view.render(width);
+  }
+
+  invalidate(): void {
+    this.view = undefined;
+  }
 }
 
 const NOTICE_TYPE = "pi-diagnostics";
@@ -70,17 +109,43 @@ export default function (pi: ExtensionAPI) {
   const captured = new Map<string, Captured>();
   let innerFetch: typeof globalThis.fetch | undefined;
   let wrapper: typeof globalThis.fetch | undefined;
+  const nativeSetting = createNativeNoticeSetting();
 
   pi.registerEntryRenderer<Notice>(NOTICE_TYPE, (entry, _options, theme) => {
-    if (typeof entry.data?.message !== "string") return undefined;
-    return new Text(theme.fg("dim", entry.data.message), 1, 0);
+    const data = entry.data;
+    if (typeof data?.message !== "string") return undefined;
+    const notice: Notice = {
+      message: data.message,
+      ...(typeof data.complement === "string" ? { complement: data.complement } : {}),
+    };
+    return new NoticeView(notice, theme, () => nativeSetting.enabled());
   });
 
-  const persistNotice = (message: string, ctx: ExtensionContext) => {
+  const persistNotice = (notice: Notice, ctx: ExtensionContext) => {
     // Custom entries survive transcript rebuilds without entering model context or starting a turn.
-    // TUI renders entry_appended itself; only RPC needs the separate UI notification.
-    pi.appendEntry<Notice>(NOTICE_TYPE, { message });
-    if (ctx.hasUI && ctx.mode === "rpc") ctx.ui.notify(message, "info");
+    // TUI renders entry_appended itself; only RPC needs the separate UI notification. Pi's native
+    // notice is interactive-only, so RPC always gets the standalone text.
+    pi.appendEntry<Notice>(NOTICE_TYPE, notice);
+    if (ctx.hasUI && ctx.mode === "rpc") ctx.ui.notify(notice.message, "info");
+  };
+
+  const syncSettingScope = (ctx: ExtensionContext) => {
+    nativeSetting.setScope({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted?.() ?? false });
+  };
+
+  /** Whether Pi's native cache-miss notice criteria hold for the persisted assistant entry. */
+  const nativeMissFor = (messageEntryId: string, message: AssistantLike, ctx: ExtensionContext): boolean => {
+    try {
+      const entries = ctx.sessionManager.getEntries();
+      const index = entries.findIndex((entry) => entry.id === messageEntryId);
+      const before = index >= 0 ? entries.slice(0, index) : entries;
+      const miss = detectNativeMiss(before as never, message, (provider, model) =>
+        ctx.modelRegistry?.find(provider, model)?.cost.cacheRead);
+      return isNativeNoticeShown(miss);
+    } catch {
+      // Best-effort mirror of Pi internals; never lose the notice itself.
+      return false;
+    }
   };
 
   const takePending = (body: unknown): Pending | undefined => {
@@ -130,7 +195,8 @@ export default function (pi: ExtensionAPI) {
     innerFetch = undefined;
   };
 
-  pi.on("session_start", () => {
+  pi.on("session_start", (_event, ctx) => {
+    syncSettingScope(ctx);
     if (config.enabled) installFetch();
   });
 
@@ -178,7 +244,8 @@ export default function (pi: ExtensionAPI) {
     if (!result) return undefined;
     captured.delete(message.responseId);
 
-    const summary = summarize(result.kind, result.raw);
+    const drop = cacheDrop(result.baselinePromptTokens, message.usage.cacheRead);
+    const summary = summarize(result.kind, result.raw, { cacheDropped: drop !== undefined });
     const expected = isExpectedMiss(
       summary,
       { modelId: result.baselineModelId, afterSummary: result.afterSummary },
@@ -186,11 +253,11 @@ export default function (pi: ExtensionAPI) {
     );
     // `unavailable` alone says nothing about hit/miss; only surface it when cached tokens actually
     // dropped versus the baseline. Model switches and compaction explain drops, so skip those.
+    // `expired` is defined by the drop, so it always carries it.
     const explainedDrop = result.afterSummary || (result.baselineModelId !== "" && result.baselineModelId !== result.modelId);
-    const droppedTokens =
-      summary.outcome === "unavailable" && !explainedDrop
-        ? cacheDrop(result.baselinePromptTokens, message.usage.cacheRead)
-        : undefined;
+    const droppedTokens = summary.outcome === "expired" || (summary.outcome === "unavailable" && !explainedDrop)
+      ? drop
+      : undefined;
 
     const diagnostic = {
       type: DIAGNOSTIC_TYPE[result.kind],
@@ -204,7 +271,8 @@ export default function (pi: ExtensionAPI) {
         ...(droppedTokens !== undefined ? { droppedTokens } : {}),
         cacheRead: message.usage.cacheRead,
         input: message.usage.input,
-        raw: (result.raw ?? null) as never,
+        // Omitted when the response had no diagnostics field, so it stays distinct from `null`.
+        ...(result.raw === undefined ? {} : { raw: result.raw as JsonValue }),
       },
     };
 
@@ -216,16 +284,22 @@ export default function (pi: ExtensionAPI) {
     // after their response in both the live transcript and restored session history.
     const message = event.message;
     if (!config.enabled || config.notify === "off" || message.role !== "assistant") return;
+    syncSettingScope(ctx);
+    let nativeMiss: boolean | undefined;
     for (const diagnostic of message.diagnostics ?? []) {
       const kind = diagnostic.type === DIAGNOSTIC_TYPE.anthropic ? "anthropic"
         : diagnostic.type === DIAGNOSTIC_TYPE.openai ? "openai" : undefined;
       const details = diagnostic.details;
       if (!kind || !isObject(details)) continue;
-      const summary = summarize(kind, details.raw);
       const droppedTokens = typeof details.droppedTokens === "number" ? details.droppedTokens : undefined;
+      const summary = summarize(kind, details.raw, { cacheDropped: droppedTokens !== undefined });
       const unexpectedMiss = (summary.outcome === "miss" && details.expected !== true) || droppedTokens !== undefined;
       if (config.notify === "all" || unexpectedMiss) {
-        persistNotice(formatNotification(summary, droppedTokens), ctx);
+        nativeMiss ??= nativeMissFor(event.messageEntryId, message, ctx);
+        persistNotice({
+          message: formatNotification(summary, droppedTokens),
+          ...(nativeMiss ? { complement: formatComplement(summary, droppedTokens) } : {}),
+        }, ctx);
       }
     }
   });
@@ -243,7 +317,9 @@ export default function (pi: ExtensionAPI) {
           const d = (diagnostic.details ?? {}) as Record<string, unknown>;
           const reason = d.reason ? ` ${d.reason}` : "";
           const expected = d.expected ? " (expected)" : "";
-          const dropped = typeof d.droppedTokens === "number" ? " · cache miss, diagnostics unavailable" : "";
+          const dropped = d.outcome === "unavailable" && typeof d.droppedTokens === "number"
+            ? " · cache miss, diagnostics unavailable"
+            : "";
           lines.push(`${message.model}: ${d.outcome}${reason}${expected}${dropped}`);
         }
       }
@@ -251,7 +327,7 @@ export default function (pi: ExtensionAPI) {
       const active = kindFor(model, config) ? "on" : "off";
       const header = `Provider cache diagnostics: ${active} for ${model ? `${model.provider}/${model.id}` : "no model"} (providers: ${config.providers.join(",")})`;
       const body = lines.length ? lines.slice(-15).join("\n") : "No diagnostics recorded on this branch yet.";
-      persistNotice(`${header}\n${body}`, ctx);
+      persistNotice({ message: `${header}\n${body}` }, ctx);
     },
   });
 }

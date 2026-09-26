@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -204,4 +204,64 @@ test("renderer ignores missing or malformed notice data", () => {
   for (const data of [undefined, null, {}, { message: 42 }]) {
     assert.equal(renderer({ data }, { expanded: false }, plainTheme), undefined);
   }
+});
+
+function withAgentDir(t, settings) {
+  const dir = mkdtempSync(join(tmpdir(), "pi-diagnostics-agent-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  const write = (value) => writeFileSync(join(dir, "settings.json"), JSON.stringify(value));
+  if (settings) write(settings);
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  return write;
+}
+
+function cachedAssistant({ cacheRead, cacheWrite, raw = MISS, responseId = "resp_1" }) {
+  const message = assistant({ raw });
+  message.responseId = responseId;
+  message.usage = {
+    input: 10, output: 1, cacheRead, cacheWrite, totalTokens: 10 + cacheRead + cacheWrite + 1,
+    cost: { input: 0.00003, output: 0, cacheRead: cacheRead * 0.3e-6, cacheWrite: cacheWrite * 3.75e-6, total: 0 },
+  };
+  return message;
+}
+
+test("notice becomes a follow-up line when Pi shows its native cache-miss notice", async (t) => {
+  const write = withAgentDir(t, { showCacheMissNotices: true });
+  const h = harness();
+  h.manager.appendMessage(cachedAssistant({ cacheRead: 0, cacheWrite: 60_000, raw: { type: "cache_hit" } }));
+  finishTurn(h, cachedAssistant({ cacheRead: 0, cacheWrite: 61_000, responseId: "resp_2" }));
+
+  assert.deepEqual(h.notices.map((entry) => entry.data), [{
+    message: MISS_TEXT,
+    complement: "↳ Provider diagnostics reason: tools_changed",
+  }]);
+  const component = h.renderers.get(NOTICE_TYPE)(h.notices[0], { expanded: false }, plainTheme);
+  assert.equal(component.render(120).join("\n").trim(), "↳ Provider diagnostics reason: tools_changed");
+
+  // Pi re-derives its notice from the current setting on rebuild; follow suit.
+  write({ showCacheMissNotices: false });
+  const rebuilt = h.renderers.get(NOTICE_TYPE)(h.notices[0], { expanded: false }, plainTheme);
+  await new Promise((resolve) => setTimeout(resolve, 1_050));
+  assert.equal(rebuilt.render(120).join("\n").trim(), MISS_TEXT);
+});
+
+test("notice stays standalone when Pi's native notice would not show", (t) => {
+  withAgentDir(t, { showCacheMissNotices: true });
+  const h = harness();
+  h.manager.appendMessage(cachedAssistant({ cacheRead: 0, cacheWrite: 6_000, raw: { type: "cache_hit" } }));
+  finishTurn(h, cachedAssistant({ cacheRead: 0, cacheWrite: 6_500, responseId: "resp_2" }));
+  assert.deepEqual(h.notices.map((entry) => entry.data), [{ message: MISS_TEXT }], "below Pi's 20k / $0.10 threshold");
+});
+
+test("rpc notifications keep standalone text even alongside a native miss", (t) => {
+  withAgentDir(t, { showCacheMissNotices: true });
+  const h = harness({ mode: "rpc" });
+  h.manager.appendMessage(cachedAssistant({ cacheRead: 0, cacheWrite: 60_000, raw: { type: "cache_hit" } }));
+  finishTurn(h, cachedAssistant({ cacheRead: 0, cacheWrite: 61_000, responseId: "resp_2" }));
+  assert.deepEqual(h.notifications, [{ message: MISS_TEXT, level: "info" }]);
 });
