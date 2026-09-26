@@ -7,7 +7,8 @@ Pi extension that opts into provider prompt-cache diagnostics and stores returne
 - Captures diagnostics from streaming `message_start` / `response.completed` events without changing response bytes.
 - Adds `anthropic_cache_diagnostics` / `openai_prompt_cache_diagnostics` to assistant messages.
 - Diagnostics notifications use `Cache miss, provider diagnostics reason: X`, without a `Warning:` prefix or token counts. `unavailable` warns only when cached tokens actually dropped versus previous turn (under half of previous prompt read from cache, more than 1,024 tokens lost).
-- `/diagnostics` shows recent results.
+- Notices are saved as non-context session entries and rendered again on resume, reload, and transcript rebuilds, like Pi's native cache-miss notices. Automatic notices are recorded at turn end, after the assistant response. They never add model context or trigger another turn.
+- `/diagnostics` shows recent results and saves its output in session history.
 
 Provider diagnostics are free and best-effort. No prompt or output content is persisted by this extension. Provider fingerprints are handled under provider retention policies.
 
@@ -40,7 +41,8 @@ export PI_DIAGNOSTICS_PROVIDERS='*'
 # Only enable one provider.
 export PI_DIAGNOSTICS_PROVIDERS='openai'
 
-# Notifications: miss (default), all, or off. Results remain in transcript with off.
+# Notices: miss (default), all, or off. Raw diagnostics remain on assistant messages with off.
+# Selected notices persist even in non-interactive sessions; RPC also receives a UI notification.
 export PI_DIAGNOSTICS_NOTIFY=all
 
 # Disable extension behavior without removing package.

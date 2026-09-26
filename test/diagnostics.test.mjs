@@ -9,6 +9,18 @@ const { default: load } = await jiti.import("../src/index.ts");
 const anthropic = { provider: "anthropic", api: "anthropic-messages", id: "claude" };
 const openai = { provider: "openai", api: "openai-responses", id: "gpt" };
 
+function loadExtension() {
+  const handlers = new Map();
+  const notices = [];
+  load({
+    on: (name, fn) => handlers.set(name, fn),
+    registerCommand: (name, def) => handlers.set(`/${name}`, def),
+    registerEntryRenderer: () => {},
+    appendEntry: (customType, data) => notices.push({ customType, data }),
+  });
+  return { handlers, notices };
+}
+
 test("defaults only enable direct anthropic/openai providers", () => {
   const config = core.parseConfig({});
   assert.equal(core.kindFor(anthropic, config), "anthropic");
@@ -83,15 +95,14 @@ test("extension end-to-end attaches diagnostics to assistant message", async (t)
     );
   };
 
-  const handlers = new Map();
-  load({ on: (name, fn) => handlers.set(name, fn), registerCommand: (name, def) => handlers.set(`/${name}`, def) });
-  const notices = [];
+  const { handlers, notices } = loadExtension();
   const branch = [{ type: "message", message: { role: "assistant", ...anthropic, model: "claude", responseId: "msg_1", stopReason: "stop" } }];
   const ctx = {
     model: anthropic,
+    mode: "tui",
     hasUI: true,
     sessionManager: { getBranch: () => branch },
-    ui: { notify: (message, level) => notices.push({ message, level }) },
+    ui: { notify: () => assert.fail("TUI notices must render from session entries") },
   };
 
   await handlers.get("session_start")({}, ctx);
@@ -105,8 +116,12 @@ test("extension end-to-end attaches diagnostics to assistant message", async (t)
   );
   assert.equal(result.message.diagnostics[0].type, "anthropic_cache_diagnostics");
   assert.equal(result.message.diagnostics[0].details.reason, "system_changed");
-  assert.equal(notices[0].level, "info");
-  assert.equal(notices[0].message, "Cache miss, provider diagnostics reason: system_changed");
+  assert.equal(notices.length, 0, "wait until the assistant message is persisted");
+  handlers.get("turn_end")({ message: result.message }, ctx);
+  assert.deepEqual(notices, [{
+    customType: "pi-diagnostics",
+    data: { message: "Cache miss, provider diagnostics reason: system_changed" },
+  }]);
   await handlers.get("session_shutdown")({}, ctx);
 });
 
@@ -119,9 +134,7 @@ async function runOpenAiTurn(t, { raw, cacheRead, baselineModel = "gpt", baselin
   globalThis.fetch = async () =>
     new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { "content-type": "text/event-stream" } });
 
-  const handlers = new Map();
-  load({ on: (name, fn) => handlers.set(name, fn), registerCommand: (name, def) => handlers.set(`/${name}`, def) });
-  const notices = [];
+  const { handlers, notices } = loadExtension();
   const branch = [
     {
       type: "message",
@@ -138,9 +151,10 @@ async function runOpenAiTurn(t, { raw, cacheRead, baselineModel = "gpt", baselin
   ];
   const ctx = {
     model: openai,
+    mode: "tui",
     hasUI: true,
     sessionManager: { getBranch: () => branch },
-    ui: { notify: (message, level) => notices.push({ message, level }) },
+    ui: { notify: () => assert.fail("TUI notices must render from session entries") },
   };
   await handlers.get("session_start")({}, ctx);
   const payload = handlers.get("before_provider_request")({ payload: { model: "gpt", input: [] } }, ctx);
@@ -149,6 +163,8 @@ async function runOpenAiTurn(t, { raw, cacheRead, baselineModel = "gpt", baselin
     { message: { role: "assistant", ...openai, model: "gpt", responseId: "resp_2", usage: { cacheRead, input: 3 } } },
     ctx,
   );
+  assert.equal(notices.length, 0, "wait until the assistant message is persisted");
+  handlers.get("turn_end")({ message: result.message }, ctx);
   await handlers.get("session_shutdown")({}, ctx);
   return { notices, details: result.message.diagnostics[0].details };
 }
@@ -156,8 +172,8 @@ async function runOpenAiTurn(t, { raw, cacheRead, baselineModel = "gpt", baselin
 test("unavailable + cached tokens dropped shows concise provider reason", async (t) => {
   const { notices, details } = await runOpenAiTurn(t, { raw: { type: "unavailable" }, cacheRead: 0 });
   assert.equal(notices.length, 1);
-  assert.equal(notices[0].level, "info");
-  assert.equal(notices[0].message, "Cache miss, provider diagnostics reason: unavailable");
+  assert.equal(notices[0].customType, "pi-diagnostics");
+  assert.equal(notices[0].data.message, "Cache miss, provider diagnostics reason: unavailable");
   assert.equal(details.droppedTokens, 97_000);
   assert.equal(details.docs, undefined);
   assert.equal(details.explanation, undefined);
