@@ -1,4 +1,5 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import {
   cacheDrop,
   createSseTap,
@@ -28,7 +29,11 @@ interface Pending {
 
 type Captured = RawResult & Pending;
 
-const STATUS_KEY = "pi-diagnostics";
+interface Notice {
+  message: string;
+}
+
+const NOTICE_TYPE = "pi-diagnostics";
 const MAX_TRACKED = 64;
 
 function isObject(value: unknown): value is Record<string, any> {
@@ -65,6 +70,18 @@ export default function (pi: ExtensionAPI) {
   const captured = new Map<string, Captured>();
   let innerFetch: typeof globalThis.fetch | undefined;
   let wrapper: typeof globalThis.fetch | undefined;
+
+  pi.registerEntryRenderer<Notice>(NOTICE_TYPE, (entry, _options, theme) => {
+    if (typeof entry.data?.message !== "string") return undefined;
+    return new Text(theme.fg("dim", entry.data.message), 1, 0);
+  });
+
+  const persistNotice = (message: string, ctx: ExtensionContext) => {
+    // Custom entries survive transcript rebuilds without entering model context or starting a turn.
+    // TUI renders entry_appended itself; only RPC needs the separate UI notification.
+    pi.appendEntry<Notice>(NOTICE_TYPE, { message });
+    if (ctx.hasUI && ctx.mode === "rpc") ctx.ui.notify(message, "info");
+  };
 
   const takePending = (body: unknown): Pending | undefined => {
     if (pending.size === 0) return undefined;
@@ -154,7 +171,7 @@ export default function (pi: ExtensionAPI) {
     return next;
   });
 
-  pi.on("message_end", (event, ctx) => {
+  pi.on("message_end", (event) => {
     const message = event.message;
     if (message.role !== "assistant" || !message.responseId) return undefined;
     const result = captured.get(message.responseId);
@@ -191,15 +208,26 @@ export default function (pi: ExtensionAPI) {
       },
     };
 
-    const unexpectedMiss = (summary.outcome === "miss" && !expected) || droppedTokens !== undefined;
-    const shouldNotify = config.notify === "all" || (config.notify === "miss" && unexpectedMiss);
-    if (shouldNotify && ctx.hasUI) {
-      // Pi prepends "Warning:" to warning-level extension notifications. Keep diagnostics notices
-      // informational so the requested stable message starts directly with "Cache miss".
-      ctx.ui.notify(formatNotification(summary, droppedTokens), "info");
-    }
-
     return { message: { ...message, diagnostics: [...(message.diagnostics ?? []), diagnostic] } };
+  });
+
+  pi.on("turn_end", (event, ctx) => {
+    // message_end runs before Pi persists the assistant. Wait for turn_end so notices remain
+    // after their response in both the live transcript and restored session history.
+    const message = event.message;
+    if (!config.enabled || config.notify === "off" || message.role !== "assistant") return;
+    for (const diagnostic of message.diagnostics ?? []) {
+      const kind = diagnostic.type === DIAGNOSTIC_TYPE.anthropic ? "anthropic"
+        : diagnostic.type === DIAGNOSTIC_TYPE.openai ? "openai" : undefined;
+      const details = diagnostic.details;
+      if (!kind || !isObject(details)) continue;
+      const summary = summarize(kind, details.raw);
+      const droppedTokens = typeof details.droppedTokens === "number" ? details.droppedTokens : undefined;
+      const unexpectedMiss = (summary.outcome === "miss" && details.expected !== true) || droppedTokens !== undefined;
+      if (config.notify === "all" || unexpectedMiss) {
+        persistNotice(formatNotification(summary, droppedTokens), ctx);
+      }
+    }
   });
 
   pi.registerCommand("diagnostics", {
@@ -223,7 +251,7 @@ export default function (pi: ExtensionAPI) {
       const active = kindFor(model, config) ? "on" : "off";
       const header = `Provider cache diagnostics: ${active} for ${model ? `${model.provider}/${model.id}` : "no model"} (providers: ${config.providers.join(",")})`;
       const body = lines.length ? lines.slice(-15).join("\n") : "No diagnostics recorded on this branch yet.";
-      ctx.ui.notify(`${header}\n${body}`, "info");
+      persistNotice(`${header}\n${body}`, ctx);
     },
   });
 }
