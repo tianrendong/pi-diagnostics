@@ -389,6 +389,16 @@ export function formatNotification(summary: Summary, droppedTokens?: number): st
 }
 
 /**
+ * Whether notice text (standalone or follow-up) reports a cache breakage: the provider named a
+ * concrete prompt change. Expiry with an unchanged prompt and `unavailable` are informational.
+ * Works on text so notices persisted by older versions classify the same way.
+ */
+export function isBreakageNotice(text: string): boolean {
+  const match = /^(?:Cache miss, provider|↳ Provider) diagnostics reason: (\S+)/.exec(text);
+  return match !== null && match[1] !== "unavailable";
+}
+
+/**
  * Follow-up line for Pi's native cache-miss notice, which already says "Cache miss" and how many
  * tokens were re-billed. Only the provider's explanation is added.
  */

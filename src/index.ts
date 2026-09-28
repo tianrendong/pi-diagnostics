@@ -6,6 +6,7 @@ import {
   createSseTap,
   formatComplement,
   formatNotification,
+  isBreakageNotice,
   DIAGNOSTIC_TYPE,
   findBaseline,
   injectDiagnostics,
@@ -47,10 +48,15 @@ type Theme = Parameters<Parameters<ExtensionAPI["registerEntryRenderer"]>[1]>[2]
 /**
  * Chooses standalone vs. follow-up text at render time: Pi re-derives its native notice from the
  * current `showCacheMissNotices` value on every transcript rebuild, so this must too.
+ *
+ * Styled like Pi's native cache-miss notice: a standalone notice gets a blank line above it, and
+ * a follow-up line has no gap so it sits directly under Pi's notice. Only an actual cache
+ * breakage (the provider names a prompt change) uses the `warning` color. Everything else,
+ * including expiry with an unchanged prompt, hits, and `/diagnostics`, stays `dim`.
  */
 class NoticeView implements Component {
-  private text?: string;
-  private view?: Text;
+  private key?: string;
+  private lines?: string[];
 
   constructor(
     private readonly notice: Notice,
@@ -59,16 +65,20 @@ class NoticeView implements Component {
   ) {}
 
   render(width: number): string[] {
-    const text = this.notice.complement && this.nativeVisible() ? this.notice.complement : this.notice.message;
-    if (!this.view || text !== this.text) {
-      this.text = text;
-      this.view = new Text(this.theme.fg("dim", text), 1, 0);
+    const followUp = this.notice.complement !== undefined && this.nativeVisible();
+    const text = followUp ? this.notice.complement! : this.notice.message;
+    const key = `${followUp}\0${width}\0${text}`;
+    if (!this.lines || key !== this.key) {
+      const color = isBreakageNotice(text) ? "warning" : "dim";
+      const body = new Text(this.theme.fg(color, text), 1, 0).render(width);
+      this.key = key;
+      this.lines = followUp ? body : ["", ...body];
     }
-    return this.view.render(width);
+    return this.lines;
   }
 
   invalidate(): void {
-    this.view = undefined;
+    this.lines = undefined;
   }
 }
 

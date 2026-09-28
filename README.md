@@ -6,7 +6,6 @@ Know why your prompt cache missed, and when it's gone.
 
   ```
   Cache miss: 42k tokens re-billed (~$0.12)
-
   ↳ Provider diagnostics reason: tools_changed
   ```
 

@@ -265,3 +265,32 @@ test("rpc notifications keep standalone text even alongside a native miss", (t) 
   finishTurn(h, cachedAssistant({ cacheRead: 0, cacheWrite: 61_000, responseId: "resp_2" }));
   assert.deepEqual(h.notifications, [{ message: MISS_TEXT, level: "info" }]);
 });
+
+test("notices match Pi's native cache-miss notice style", (t) => {
+  const write = withAgentDir(t, { showCacheMissNotices: false });
+  const h = harness();
+  const renderer = h.renderers.get(NOTICE_TYPE);
+  const tagTheme = { fg: (color, text) => `<${color}>${text}</${color}>` };
+  const render = (data) => renderer({ data }, { expanded: false }, tagTheme).render(120).map((line) => line.trimEnd());
+
+  // Standalone miss: blank line above, warning color, like Pi's own notice.
+  assert.deepEqual(render({ message: MISS_TEXT }), ["", ` <warning>${MISS_TEXT}</warning>`]);
+  // No breakage (hit, expiry with an unchanged prompt, unknown cause): the old muted grey.
+  for (const message of [
+    "Provider diagnostics result: cache hit",
+    "Cache miss, provider diagnostics: prompt unchanged, cache entry expired",
+    "Cache miss, provider diagnostics reason: unavailable",
+  ]) {
+    assert.deepEqual(render({ message }), ["", ` <dim>${message}</dim>`]);
+  }
+
+  // Follow-up under Pi's native notice: no gap, warning color.
+  write({ showCacheMissNotices: true });
+  const complement = "↳ Provider diagnostics reason: tools_changed";
+  assert.deepEqual(render({ message: MISS_TEXT, complement }), [` <warning>${complement}</warning>`]);
+  const expired = "↳ Provider diagnostics: prompt unchanged, cache entry expired";
+  assert.deepEqual(
+    render({ message: "Cache miss, provider diagnostics: prompt unchanged, cache entry expired", complement: expired }),
+    [` <dim>${expired}</dim>`],
+  );
+});
