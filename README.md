@@ -11,7 +11,9 @@ Know why your prompt cache missed, and when it's gone.
 
 - **Expiry reminders.** A note appears when your cache has likely expired, so you know it's a cheap moment to `/compact`, switch models, or change tools.
 
-Both are display-only and never add to model context.
+- **Smarter cache warming.** With `cacheWarming: "idle"`, keeps the cache warm when you're likely to reply soon: text in the editor, a queued message, or the agent's last message asks you something. It only ever adds warms that clear Pi's savings bar; it never cancels warming Pi chose.
+
+Diagnostics and reminders are display-only and never add to model context.
 
 ## Install
 

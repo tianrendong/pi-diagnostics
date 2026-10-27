@@ -1,7 +1,7 @@
 {
   "name": "pi-diagnostics",
-  "version": "0.3.2",
-  "description": "Prompt-cache diagnostics and expiry reminders for pi",
+  "version": "0.4.0",
+  "description": "Prompt-cache diagnostics, expiry reminders, and smarter cache warming for pi",
   "keywords": [
     "pi",
     "pi-package",
@@ -9,7 +9,8 @@
     "diagnostics",
     "anthropic",
     "openai",
-    "cache-expiry"
+    "cache-expiry",
+    "cache-warming"
   ],
   "license": "MIT",
   "author": "Tianren Dong",
@@ -37,7 +38,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts",
-      "./src/expiry.ts"
+      "./src/expiry.ts",
+      "./src/warming.ts"
     ]
   },
   "peerDependencies": {
